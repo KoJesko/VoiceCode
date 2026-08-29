@@ -347,19 +347,31 @@ without it, tightening an allowlist wouldn't evict an existing connection.
 
 ---
 
-## 5. What I need from you before implementing
+## 5. Decisions taken
 
-1. **The DAVE workaround** (§1.1) — proceed with the private-attribute adapter?
-   The alternative is a Stage-only bot, which I don't recommend.
-2. **`TMUX_SESSION` name**, or switch the default to `headless`. Blocking — you asked
-   me to ask.
-3. **Typed `BridgeEvent`** instead of `AsyncIterator[str]` (§3) — confirm.
-4. **Offline-at-endpoint ASR** instead of streaming (§1.5) — confirm, and confirm
-   whether `parakeet-unified` or `parakeet-tdt-0.6b-v3` is the default.
+All four open questions were answered before implementation:
 
-Items 2 is a hard blocker. 1, 3, and 4 have defaults I'll proceed with if you'd rather
-just say "go".
+1. **DAVE workaround** — proceed with the `davey` adapter and the private-attribute
+   read, guarded by a startup preflight. Implemented in `audio/dave.py`.
+2. **Bridge** — build both, default to `headless`. `tmux` still requires
+   `TMUX_SESSION`; selecting it without one is a startup error naming the fix, since
+   the session name was never supplied.
+3. **Event stream** — typed `BridgeEvent`, not `AsyncIterator[str]`.
+4. **ASR** — offline at the VAD endpoint, defaulting to `parakeet-unified-en-0.6b`
+   with `parakeet-tdt-0.6b-v3` selectable via `ASR_BACKEND=hf_tdt`.
 
-I cannot run the full pipeline in this environment — no GPU, no `ffmpeg`, no `espeak-ng`.
-Pure-logic modules will be tested here; the model-loading path and `--selftest` will be
-written against the verified APIs above and need a run on your box.
+## 6. What could not be verified here
+
+This environment has no GPU, no `ffmpeg`, and no `espeak-ng`, so the model-loading
+paths were written against the APIs verified in section 1 but not executed. What *was*
+executed here:
+
+- the DAVE preflight, against the real `davey` and `discord.py` builds;
+- auth detection, against the real `claude` binary;
+- the whole pure-logic layer, under 113 tests;
+- `--selftest`, end to end, degrading correctly with the models absent.
+
+Still needs a run on the target machine: NeMo 3.0 loading `parakeet-unified-en-0.6b`
+(the model card names NeMo 2.7.3, which was the final pre-split release), Kokoro
+synthesis, silero-vad, and a real Discord voice connection to confirm the DAVE
+decryption path against live traffic.

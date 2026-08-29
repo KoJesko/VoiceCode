@@ -177,7 +177,7 @@ async def detect_auth(claude_binary: str = "claude", timeout: float = 20.0) -> A
             env=env,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         log.warning("`%s auth status` timed out after %.0fs", claude_binary, timeout)
         return _require_acceptable(fallback)
     except OSError as exc:

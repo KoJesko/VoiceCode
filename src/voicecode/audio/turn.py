@@ -109,16 +109,12 @@ class TurnBuffer:
 
     def _advance(self, audio16: np.ndarray) -> list[TurnEvent]:
         events: list[TurnEvent] = []
-        probabilities = self.vad.feed(audio16)
-        if not probabilities:
-            return events
+        # The VAD returns each window with its score. It buffers across calls, so a
+        # window can span two chunks -- deriving windows by slicing audio16 here would
+        # pair scores with the wrong samples.
+        scored = self.vad.feed(audio16)
 
-        # feed() consumes whole windows only, so probabilities map 1:1 onto the
-        # leading WINDOW_SAMPLES*n samples it just accepted.
-        consumed = len(probabilities) * WINDOW_SAMPLES
-        windows = np.split(audio16[:consumed], len(probabilities)) if consumed else []
-
-        for probability, window in zip(probabilities, windows, strict=False):
+        for probability, window in scored:
             is_speech = self.vad.is_speech(probability)
 
             if not self._speaking:

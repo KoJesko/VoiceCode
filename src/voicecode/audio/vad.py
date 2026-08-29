@@ -60,8 +60,13 @@ class SileroVad:
         if model is not None and hasattr(model, "reset_states"):
             model.reset_states()
 
-    def feed(self, audio: np.ndarray) -> list[float]:
-        """Feed 16 kHz mono float32. Returns a probability per completed window."""
+    def feed(self, audio: np.ndarray) -> list[tuple[float, np.ndarray]]:
+        """Feed 16 kHz mono float32. Returns (probability, window) per completed window.
+
+        The window is returned rather than just its score because this class buffers
+        across calls: a window can span two fed chunks, so the caller cannot recover
+        which samples a probability refers to by slicing its own input.
+        """
         if audio.size:
             self._buffer = np.concatenate([self._buffer, audio.astype(np.float32)])
 
@@ -70,16 +75,16 @@ class SileroVad:
 
         model = self._ensure()
         torch = self._torch
-        probabilities: list[float] = []
+        scored: list[tuple[float, np.ndarray]] = []
         offset = 0
         with torch.no_grad():
             while offset + WINDOW_SAMPLES <= self._buffer.size:
-                window = self._buffer[offset : offset + WINDOW_SAMPLES]
-                tensor = torch.from_numpy(np.ascontiguousarray(window))
-                probabilities.append(float(model(tensor, SAMPLE_RATE).item()))
+                window = np.ascontiguousarray(self._buffer[offset : offset + WINDOW_SAMPLES])
+                tensor = torch.from_numpy(window)
+                scored.append((float(model(tensor, SAMPLE_RATE).item()), window))
                 offset += WINDOW_SAMPLES
         self._buffer = self._buffer[offset:]
-        return probabilities
+        return scored
 
     def is_speech(self, probability: float) -> bool:
         return probability >= self._threshold
@@ -102,15 +107,15 @@ class EnergyVad:
     def reset(self) -> None:
         self._buffer = np.zeros(0, dtype=np.float32)
 
-    def feed(self, audio: np.ndarray) -> list[float]:
+    def feed(self, audio: np.ndarray) -> list[tuple[float, np.ndarray]]:
         if audio.size:
             self._buffer = np.concatenate([self._buffer, audio.astype(np.float32)])
-        out: list[float] = []
+        out: list[tuple[float, np.ndarray]] = []
         offset = 0
         while offset + WINDOW_SAMPLES <= self._buffer.size:
-            window = self._buffer[offset : offset + WINDOW_SAMPLES]
+            window = np.ascontiguousarray(self._buffer[offset : offset + WINDOW_SAMPLES])
             rms = float(np.sqrt(np.mean(window**2)))
-            out.append(min(1.0, rms / max(self._threshold, 1e-6)))
+            out.append((min(1.0, rms / max(self._threshold, 1e-6)), window))
             offset += WINDOW_SAMPLES
         self._buffer = self._buffer[offset:]
         return out

@@ -17,9 +17,11 @@ from ..speech.sanitize import split_sentences
 
 # A sentence is releasable once terminal punctuation is followed by a space or newline.
 _TERMINAL = re.compile(r"[.!?][\"')\]]?(?=\s)|\n\n")
-# Below this, a "sentence" is usually a fragment or a stray token; hold it and let it
-# merge with the next one rather than sending Kokoro a two-word utterance.
-MIN_RELEASE_CHARS = 12
+# Everything released has already been cut at terminal punctuation, so short is not the
+# same as incomplete -- "Done." is a whole answer, and holding it back would delay
+# speech in exactly the case where Claude replies briefly. The only thing worth
+# suppressing is an item with no letters in it, such as a stray "3." from a list.
+_HAS_LETTERS = re.compile(r"[A-Za-z]")
 
 
 class SentenceStreamer:
@@ -45,14 +47,7 @@ class SentenceStreamer:
         head = self._pending[: last.end()]
         tail = self._pending[last.end() :]
 
-        released = [s for s in split_sentences(head) if s.strip()]
-        if not released:
-            return []
-
-        # Hold a too-short trailing fragment back so it merges with what comes next.
-        if len(released[-1]) < MIN_RELEASE_CHARS:
-            tail = released.pop() + " " + tail
-
+        released = [s for s in split_sentences(head) if _HAS_LETTERS.search(s)]
         self._pending = tail
         return released
 

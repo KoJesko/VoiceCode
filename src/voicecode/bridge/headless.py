@@ -35,7 +35,7 @@ import signal
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .auth import AuthInfo, check_forbidden_flags, build_subprocess_env, detect_auth
+from .auth import AuthInfo, build_subprocess_env, check_forbidden_flags, detect_auth
 from .base import (
     AuthError,
     BridgeError,
@@ -379,7 +379,7 @@ class HeadlessBridge:
             process.terminate()
         try:
             await asyncio.wait_for(process.wait(), timeout=5)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
         self._process = None

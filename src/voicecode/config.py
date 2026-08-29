@@ -14,6 +14,7 @@ Two things here are load-bearing beyond ordinary settings handling:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator, Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,8 @@ def _parse_id_set(value: Any) -> Any:
         if not text:
             return set()
         if text.startswith("["):
-            return text  # let pydantic do the JSON parse
+            # NoDecode means nothing else will parse this, so do it here.
+            return {int(item) for item in json.loads(text)}
         return {int(part) for part in text.replace(",", " ").split() if part}
     return value
 
@@ -66,7 +68,7 @@ def _parse_binding(value: Any) -> Any:
         if not text:
             return {}
         if text.startswith("{"):
-            return text
+            return {int(k): int(v) for k, v in json.loads(text).items()}
         out: dict[int, int] = {}
         for pair in text.replace(",", " ").split():
             if ":" not in pair:
@@ -79,8 +81,11 @@ def _parse_binding(value: Any) -> Any:
     return value
 
 
-IdSet = Annotated[set[int], BeforeValidator(_parse_id_set)]
-Binding = Annotated[dict[int, int], BeforeValidator(_parse_binding)]
+# NoDecode stops pydantic-settings from JSON-decoding these before our validators
+# run. Without it, GUILD_ALLOWLIST=1,2,3 raises a SettingsError from the dotenv source
+# rather than reaching _parse_id_set, because set[int] is a "complex" field.
+IdSet = Annotated[set[int], NoDecode, BeforeValidator(_parse_id_set)]
+Binding = Annotated[dict[int, int], NoDecode, BeforeValidator(_parse_binding)]
 
 
 class Settings(BaseSettings):

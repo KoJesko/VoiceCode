@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from discord.ext import voice_recv
 
@@ -185,6 +186,10 @@ class VoiceCodeSink(voice_recv.AudioSink):
     @property
     def muted(self) -> bool:
         return self._muted
+
+    @property
+    def decryptor(self) -> DaveDecryptor:
+        return self._decryptor
 
     # -- internals --------------------------------------------------------------
 

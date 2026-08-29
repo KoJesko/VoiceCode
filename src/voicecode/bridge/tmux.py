@@ -102,8 +102,9 @@ class TmuxBridge:
     async def start(self) -> None:
         code, out, err = await self._run("tmux", "has-session", "-t", self._session)
         if code != 0:
+            detail = err.strip() or "no such session"
             raise BridgeError(
-                f"tmux session {self._session!r} does not exist ({err.strip() or 'no such session'}). "
+                f"tmux session {self._session!r} does not exist ({detail}). "
                 "Start Claude Code in a tmux session first, e.g. "
                 f"`tmux new -s {self._session} claude`."
             )
@@ -114,11 +115,17 @@ class TmuxBridge:
 
         # Establish the baseline so the first turn does not replay the scrollback.
         self._committed = len(await self._capture())
-        log.info("attached to tmux session %r (%d lines of history)", self._session, self._committed)
+        log.info(
+            "attached to tmux session %r (%d lines of history)",
+            self._session,
+            self._committed,
+        )
 
     async def _check_session_env(self) -> None:
         """The tmux server has its own environment; ours cannot reach it."""
-        code, out, _ = await self._run("tmux", "show-environment", "-t", self._session)
+        code, out, _ = await self._run(
+            "tmux", "show-environment", "-t", self._session
+        )
         if code != 0:
             log.warning(
                 "could not read the tmux session environment; cannot confirm that "
@@ -269,7 +276,9 @@ class TmuxBridge:
                         "heuristic": True,
                         "options": dict(self._pending_options),
                         "prompt": "\n".join(
-                            l.strip() for l in lines if not _is_furniture(l) and l.strip()
+                            line.strip()
+                            for line in lines
+                            if not _is_furniture(line) and line.strip()
                         ),
                     },
                 )
