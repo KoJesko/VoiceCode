@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 import time
 import wave
 from pathlib import Path
@@ -35,6 +36,11 @@ class NemoUnifiedASR:
         self.device = device
         self._model = None
         self._accepts_arrays: bool | None = None
+        # Inference runs on a worker thread (asyncio.to_thread), and two people
+        # talking at once means two concurrent calls into the same model object.
+        # NeMo models are not thread-safe, so serialise here rather than relying
+        # on every caller to remember.
+        self._lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -104,10 +110,21 @@ class NemoUnifiedASR:
         started = time.perf_counter()
         audio = np.ascontiguousarray(audio, dtype=np.float32)
 
+        with self._lock:
+            outputs = self._run(audio)
+
+        return Transcript(
+            text=_extract_text(outputs),
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            backend=self.name,
+        )
+
+    def _run(self, audio: np.ndarray):
         if self._accepts_arrays is not False:
             try:
                 outputs = self._model.transcribe([audio], batch_size=1, verbose=False)
                 self._accepts_arrays = True
+                return outputs
             except Exception as exc:
                 if self._accepts_arrays is True:
                     raise
@@ -117,15 +134,8 @@ class NemoUnifiedASR:
                     type(exc).__name__,
                 )
                 self._accepts_arrays = False
-                outputs = self._transcribe_via_file(audio)
-        else:
-            outputs = self._transcribe_via_file(audio)
-
-        return Transcript(
-            text=_extract_text(outputs),
-            duration_ms=(time.perf_counter() - started) * 1000.0,
-            backend=self.name,
-        )
+                return self._transcribe_via_file(audio)
+        return self._transcribe_via_file(audio)
 
     def _transcribe_via_file(self, audio: np.ndarray):
         with tempfile.TemporaryDirectory(prefix="voicecode-asr-") as tmp:

@@ -153,7 +153,7 @@ class HeadlessBridge:
 
             try:
                 assert process.stdout is not None
-                async for line in process.stdout:
+                async for line in _iter_lines(process.stdout):
                     for event in self._parse_line(line, tool_names):
                         yield event
             except asyncio.CancelledError:
@@ -383,6 +383,32 @@ class HeadlessBridge:
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
         self._process = None
+
+
+async def _iter_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
+    """Yield lines, skipping any single line too large for the stream buffer.
+
+    A tool_result carrying a large file or diff can exceed the reader limit, and
+    StreamReader raises ValueError rather than truncating -- which used to abort
+    the whole turn. readline() has already removed the oversized line from the
+    buffer by the time it raises (it deletes through the separator when one is
+    present, and clears the buffer otherwise), so recovery is just to continue.
+    Draining further would eat the next good line. The lost content is
+    mirror-only, so the turn survives and the gap is logged.
+    """
+    while True:
+        try:
+            line = await stream.readline()
+        except ValueError:
+            log.warning(
+                "skipped an oversized line on the claude stream (over %d bytes); "
+                "its content is missing from the mirror",
+                _MAX_LINE_BYTES,
+            )
+            continue
+        if not line:
+            return
+        yield line
 
 
 def _flatten_content(content: Any) -> str:

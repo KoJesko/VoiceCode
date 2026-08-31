@@ -13,6 +13,7 @@ connection is off.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 
@@ -48,6 +49,9 @@ class KokoroTTS:
         self.speed = speed
         self._pipeline = None
         self._disabled_reason: str | None = None
+        # Synthesis runs on worker threads, and a barge-in retry can overlap the
+        # previous turn's tail. KPipeline holds model state; serialise it.
+        self._lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -114,10 +118,13 @@ class KokoroTTS:
 
         started = time.perf_counter()
         try:
-            chunks = [
-                _to_numpy(audio)
-                for _, _, audio in self._pipeline(text, voice=self.voice, speed=self.speed)
-            ]
+            with self._lock:
+                chunks = [
+                    _to_numpy(audio)
+                    for _, _, audio in self._pipeline(
+                        text, voice=self.voice, speed=self.speed
+                    )
+                ]
         except Exception as exc:
             if _is_oom(exc):
                 self.disable(f"GPU out of memory during synthesis ({exc})")

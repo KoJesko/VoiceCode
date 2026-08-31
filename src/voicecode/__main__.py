@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
+import signal
 import sys
 import time
 import wave
@@ -324,13 +326,39 @@ async def run_bot(config: ConfigStore) -> int:
     log.info("scope: %s", describe_scope(config.snapshot))
 
     bot = VoiceCodeBot(config=config, asr=asr, tts=tts, bridge=bridge)
+    _install_shutdown_handlers(bot)
     try:
         await bot.start(settings.discord_token.get_secret_value())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        # Leaves voice channels, stops playback, and terminates any in-flight
+        # `claude -p` subprocess rather than orphaning it.
         await bot.close()
+        log.info("shutdown complete")
     return 0
+
+
+def _install_shutdown_handlers(bot) -> None:
+    """Close the bot cleanly on SIGTERM/SIGINT.
+
+    Without this a service restart drops the process mid-turn: Discord is left
+    to time the voice connection out, and an in-flight Claude Code subprocess is
+    orphaned. Signal handlers are best-effort -- not every platform or event
+    loop supports them, and falling back to the default behaviour is fine.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _request_shutdown(signame: str) -> None:
+        log.info("received %s, shutting down", signame)
+        loop.create_task(bot.close())
+
+    for signame in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, signame, None)
+        if sig is None:
+            continue
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(sig, _request_shutdown, signame)
 
 
 # -- cli -------------------------------------------------------------------------

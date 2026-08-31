@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -37,6 +38,11 @@ from .turn import TurnBuffer, TurnEvent, TurnEventKind
 from .vad import EnergyVad, SileroVad
 
 log = logging.getLogger(__name__)
+
+
+# A user whose buffer has seen no audio for this long is reclaimed, releasing
+# their resampler and VAD state. They get a fresh buffer if they speak again.
+IDLE_BUFFER_TTL_S = 120.0
 
 
 class TurnConsumer(Protocol):
@@ -75,6 +81,7 @@ class VoiceCodeSink(voice_recv.AudioSink):
 
         self._decoders = OpusDecoderPool()
         self._buffers: dict[int, TurnBuffer] = {}
+        self._last_audio_at: dict[int, float] = {}
         self._ssrc_for_user: dict[int, int] = {}
         self._muted = False
         self._accepting = True
@@ -91,6 +98,7 @@ class VoiceCodeSink(voice_recv.AudioSink):
                 self._dispatch(self._consumer.on_utterance(event))
             self._decryptor.forget(user_id)
         self._buffers.clear()
+        self._last_audio_at.clear()
         self._decoders.clear()
         self._ssrc_for_user.clear()
 
@@ -122,6 +130,9 @@ class VoiceCodeSink(voice_recv.AudioSink):
         if not pcm:
             return
 
+        self._last_audio_at[user_id] = time.monotonic()
+        self._reclaim_idle_buffers()
+
         try:
             events = self._buffer_for(user_id).push_pcm(pcm)
         except Exception:
@@ -139,9 +150,22 @@ class VoiceCodeSink(voice_recv.AudioSink):
 
     @voice_recv.AudioSink.listener()
     def on_voice_member_speaking_start(self, member: Any) -> None:
-        if not self._snapshot().user_allowed(getattr(member, "id", None)):
+        """Coarse gate: the earliest signal that someone has started talking.
+
+        This is Discord's own speaking flag, sent by the speaker's client and
+        delivered with their first packet -- ahead of anything the VAD can
+        confirm, which needs a window or two plus resampler latency. That head
+        start is worth having for barge-in specifically, where being late is
+        heard as the bot talking over you. It does NOT start a turn: the VAD
+        still decides what counts as speech and where it ends.
+        """
+        user_id = getattr(member, "id", None)
+        if not self._snapshot().user_allowed(user_id):
             return
-        log.debug("speaking start: %s", getattr(member, "display_name", member))
+        if self._muted or not self._accepting:
+            return
+        log.debug("speaking start (coarse gate): %s", user_id)
+        self._dispatch(self._consumer.on_speech_start(user_id))
 
     @voice_recv.AudioSink.listener()
     def on_voice_member_speaking_stop(self, member: Any) -> None:
@@ -152,8 +176,9 @@ class VoiceCodeSink(voice_recv.AudioSink):
         if buffer is None or not buffer.speaking:
             return
         # Do not endpoint here. Discord's speaking flag drops during natural pauses
-        # mid-sentence; letting it end the turn truncates people constantly. The VAD
-        # owns the endpoint; this event only marks the stream as idle.
+        # mid-sentence -- the extension derives it from packet activity with a
+        # 200 ms timeout -- so ending the turn on it would truncate people
+        # constantly. The VAD owns the endpoint.
         log.debug("speaking stop: %s (VAD still owns the endpoint)", user_id)
 
     @voice_recv.AudioSink.listener()
@@ -162,6 +187,7 @@ class VoiceCodeSink(voice_recv.AudioSink):
         if user_id is None:
             return
         buffer = self._buffers.pop(user_id, None)
+        self._last_audio_at.pop(user_id, None)
         if buffer is not None:
             event = buffer.flush("disconnect")
             if event is not None:
@@ -192,6 +218,29 @@ class VoiceCodeSink(voice_recv.AudioSink):
         return self._decryptor
 
     # -- internals --------------------------------------------------------------
+
+    def _reclaim_idle_buffers(self) -> None:
+        """Drop per-user state for anyone who has been silent for a while.
+
+        Each buffer holds a soxr resampler and a silero RNN state, so a busy
+        channel would otherwise accumulate them for every user who ever spoke.
+        A buffer mid-utterance is never reclaimed -- that would discard audio.
+        """
+        if len(self._buffers) < 2:
+            return
+        cutoff = time.monotonic() - IDLE_BUFFER_TTL_S
+        for user_id, last in list(self._last_audio_at.items()):
+            if last > cutoff:
+                continue
+            buffer = self._buffers.get(user_id)
+            if buffer is not None and buffer.speaking:
+                continue
+            self._buffers.pop(user_id, None)
+            self._last_audio_at.pop(user_id, None)
+            ssrc = self._ssrc_for_user.pop(user_id, None)
+            if ssrc is not None:
+                self._decoders.drop(ssrc)
+            log.debug("reclaimed idle turn buffer for user %s", user_id)
 
     def _buffer_for(self, user_id: int) -> TurnBuffer:
         buffer = self._buffers.get(user_id)

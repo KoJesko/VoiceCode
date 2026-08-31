@@ -13,6 +13,7 @@ AutoModelForTDT is missing, that is the reason, and the error below says so.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import numpy as np
@@ -32,6 +33,9 @@ class HFParakeetASR:
         self.device = device
         self._model = None
         self._processor = None
+        # See nemo_unified: inference runs on worker threads and must be
+        # serialised per model object.
+        self._lock = threading.Lock()
 
     def load(self) -> None:
         if self._model is not None:
@@ -101,12 +105,14 @@ class HFParakeetASR:
             "sampling_rate",
             ASR_SAMPLE_RATE,
         )
-        inputs = self._processor([np.asarray(audio, dtype=np.float32)], sampling_rate=rate)
-        inputs = inputs.to(self._model.device, dtype=self._model.dtype)
-
-        with torch.no_grad():
-            output = self._model.generate(**inputs, return_dict_in_generate=True)
-        decoded = self._processor.decode(output.sequences, skip_special_tokens=True)
+        with self._lock:
+            inputs = self._processor(
+                [np.asarray(audio, dtype=np.float32)], sampling_rate=rate
+            )
+            inputs = inputs.to(self._model.device, dtype=self._model.dtype)
+            with torch.no_grad():
+                output = self._model.generate(**inputs, return_dict_in_generate=True)
+            decoded = self._processor.decode(output.sequences, skip_special_tokens=True)
 
         if isinstance(decoded, (list, tuple)):
             decoded = decoded[0] if decoded else ""
