@@ -244,6 +244,14 @@ def register_commands(bot) -> None:  # noqa: C901 - a flat command table reads b
             dave = getattr(session.sink, "decryptor", None)
             if dave is not None:
                 lines.append(f"DAVE: {dave.status.describe()}")
+            report = getattr(session.sink, "diagnosis", None)
+            if report is not None:
+                lines += [
+                    "",
+                    "**Receive path**",
+                    f"`{report.describe().splitlines()[0]}`",
+                    report.verdict(),
+                ]
             if session.pending_permission is not None:
                 lines.append(
                     f"⛔ awaiting permission for `{session.pending_permission.tool}`"

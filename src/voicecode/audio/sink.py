@@ -27,6 +27,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from discord.ext import voice_recv
@@ -43,6 +44,86 @@ log = logging.getLogger(__name__)
 # A user whose buffer has seen no audio for this long is reclaimed, releasing
 # their resampler and VAD state. They get a fresh buffer if they speak again.
 IDLE_BUFFER_TTL_S = 120.0
+
+# Frames to observe before the receive path is willing to call itself broken.
+# 250 frames is 5 seconds of speech: long enough that a healthy path has
+# certainly decoded something, short enough to fail during the first sentence
+# somebody speaks rather than after a frustrating session.
+DIAGNOSIS_MIN_FRAMES = 250
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiveDiagnosis:
+    """Whether audio is actually arriving, and if not, which stage lost it.
+
+    This exists because the receive path fails silently. Decrypting with the
+    wrong key does not raise: it produces bytes that are not Opus, the decoder
+    rejects them at DEBUG level, and the channel simply stays quiet. The same
+    silence is produced by a missing intent, a deafened bot, an empty
+    USER_ALLOWLIST, and a VAD threshold set too high -- four unrelated
+    problems with one symptom. Counting each stage separates them.
+    """
+
+    frames_in: int
+    decrypted: int
+    passthrough: int
+    decrypt_dropped: int
+    decoded: int
+    decode_failed: int
+    utterances: int
+    dave: str
+
+    @property
+    def healthy(self) -> bool:
+        return self.frames_in > 0 and self.decoded > 0
+
+    @property
+    def conclusive(self) -> bool:
+        """True once enough frames have arrived for `verdict` to mean something."""
+        return self.frames_in >= DIAGNOSIS_MIN_FRAMES
+
+    def verdict(self) -> str:
+        """One line naming the stage that lost the audio, and what causes it."""
+        if self.frames_in == 0:
+            return (
+                "no audio received at all -- check that the bot is not "
+                "server-deafened, that the voice_states intent is on, and that "
+                "the speaker is in USER_ALLOWLIST (their audio is dropped at "
+                "the sink before decryption)"
+            )
+        if not self.conclusive:
+            return f"only {self.frames_in} frame(s) so far; too early to judge"
+        if self.decoded == 0:
+            if self.decrypt_dropped > self.passthrough:
+                return (
+                    f"DAVE decryption is failing ({self.decrypt_dropped} frame(s) "
+                    "dropped) -- the session is active but rejecting our calls"
+                )
+            return (
+                f"every Opus decode failed ({self.decode_failed} frame(s)) while "
+                f"DAVE reported {self.dave!r}. Frames are arriving still "
+                "encrypted: the decrypt step is being skipped, not performed. "
+                "This is the failure audio/dave.py exists to prevent -- treat a "
+                "passthrough-heavy tally here as the bug, not as normal"
+            )
+        if self.utterances == 0:
+            return (
+                f"{self.decoded} frame(s) decoded cleanly but nothing was "
+                "endpointed -- audio is healthy and the VAD is the problem; "
+                "lower VAD_THRESHOLD or MIN_UTTERANCE_MS"
+            )
+        return (
+            f"healthy -- {self.decoded} frame(s) decoded, "
+            f"{self.utterances} utterance(s) endpointed"
+        )
+
+    def describe(self) -> str:
+        return (
+            f"in={self.frames_in} decrypted={self.decrypted} "
+            f"passthrough={self.passthrough} dropped={self.decrypt_dropped} "
+            f"decoded={self.decoded} decode_failed={self.decode_failed} "
+            f"utterances={self.utterances}\n{self.verdict()}"
+        )
 
 
 class TurnConsumer(Protocol):
@@ -85,6 +166,9 @@ class VoiceCodeSink(voice_recv.AudioSink):
         self._ssrc_for_user: dict[int, int] = {}
         self._muted = False
         self._accepting = True
+        self._frames_in = 0
+        self._utterances = 0
+        self._warned_broken = False
 
     # -- required AudioSink surface --------------------------------------------
 
@@ -121,13 +205,16 @@ class VoiceCodeSink(voice_recv.AudioSink):
         packet = data.packet
         ssrc = getattr(packet, "ssrc", user_id)
         self._ssrc_for_user[user_id] = ssrc
+        self._frames_in += 1
 
         plaintext = self._decryptor.decrypt(user_id, payload)
         if plaintext is None:
+            self._check_receive_health()
             return
 
         pcm = self._decoders.decode(ssrc, plaintext)
         if not pcm:
+            self._check_receive_health()
             return
 
         self._last_audio_at[user_id] = time.monotonic()
@@ -140,7 +227,41 @@ class VoiceCodeSink(voice_recv.AudioSink):
             return
 
         for event in events:
+            if event.kind is TurnEventKind.UTTERANCE:
+                self._utterances += 1
             self._emit(event)
+
+    # -- diagnosis --------------------------------------------------------------
+
+    @property
+    def diagnosis(self) -> ReceiveDiagnosis:
+        """A snapshot of what the receive path has actually managed to do."""
+        return ReceiveDiagnosis(
+            frames_in=self._frames_in,
+            decrypted=self._decryptor.decrypted,
+            passthrough=self._decryptor.passthrough,
+            decrypt_dropped=self._decryptor.dropped,
+            decoded=self._decoders.decoded,
+            decode_failed=self._decoders.failed,
+            utterances=self._utterances,
+            dave=self._decryptor.status.describe(),
+        )
+
+    def _check_receive_health(self) -> None:
+        """Say so, once, when frames are arriving but none of them survive.
+
+        Called only on the failure branches, so the healthy path costs nothing.
+        A single WARNING is the whole point: without it this failure has no
+        symptom other than the bot never answering, which reads as a hung ASR
+        or a bad microphone rather than as a decryption problem.
+        """
+        if self._warned_broken:
+            return
+        report = self.diagnosis
+        if not report.conclusive or report.healthy:
+            return
+        self._warned_broken = True
+        log.warning("receive path is not producing audio: %s", report.describe())
 
     # -- speaking-state listeners ----------------------------------------------
     # These are dispatched to sinks only -- a @bot.event handler for them never

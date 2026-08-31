@@ -25,10 +25,18 @@ FRAME_BYTES = Decoder.FRAME_SIZE  # 3840 == 20 ms stereo s16le
 class OpusDecoderPool:
     """Keeps one Opus decoder per SSRC and disposes of them on disconnect."""
 
-    __slots__ = ("_decoders",)
+    __slots__ = ("_decoders", "decoded", "failed")
 
     def __init__(self) -> None:
         self._decoders: dict[int, Decoder] = {}
+        # A sustained run of failures here is the signature of feeding the
+        # decoder ciphertext, which is what a broken DAVE decrypt looks like
+        # from downstream. Counted so ReceiveDiagnosis can say so out loud
+        # instead of leaving the channel quiet with only DEBUG lines.
+        # Concealment frames are excluded: they are our own synthesis, not
+        # evidence that anything arrived intact.
+        self.decoded = 0
+        self.failed = 0
 
     def decode(self, ssrc: int, payload: bytes | None) -> bytes:
         """Decode one frame to 48 kHz stereo s16le. Returns b"" on failure."""
@@ -37,10 +45,15 @@ class OpusDecoderPool:
             decoder = Decoder()
             self._decoders[ssrc] = decoder
         try:
-            return decoder.decode(payload)
+            pcm = decoder.decode(payload)
         except OpusError as exc:
+            if payload is not None:
+                self.failed += 1
             log.debug("opus decode failed for ssrc %s: %s", ssrc, exc)
             return b""
+        if payload is not None:
+            self.decoded += 1
+        return pcm
 
     def conceal(self, ssrc: int) -> bytes:
         """Generate one frame of loss concealment for a gap in the stream."""
