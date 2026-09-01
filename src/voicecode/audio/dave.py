@@ -121,12 +121,26 @@ class DaveDecryptor:
     when Discord explicitly puts the session into passthrough.
     """
 
-    __slots__ = ("_voice_client", "_warned_missing", "_fail_counts")
+    __slots__ = (
+        "_voice_client",
+        "_warned_missing",
+        "_fail_counts",
+        "decrypted",
+        "passthrough",
+        "dropped",
+    )
 
     def __init__(self, voice_client: Any):
         self._voice_client = voice_client
         self._warned_missing = False
         self._fail_counts: dict[int, int] = {}
+        # Frame tallies. These exist for one reason: a broken decrypt path is
+        # otherwise silent. Decrypting with the wrong key does not raise -- it
+        # yields bytes that are not Opus, and the decoder rejects them at DEBUG.
+        # The channel just goes quiet. See ReceiveDiagnosis in sink.py.
+        self.decrypted = 0
+        self.passthrough = 0
+        self.dropped = 0
 
     def _session(self) -> Any | None:
         connection = getattr(self._voice_client, "_connection", None)
@@ -166,21 +180,28 @@ class DaveDecryptor:
 
         session = self._session()
         if session is None:
+            self.passthrough += 1
             return payload  # no DAVE in play; transport decryption was enough
 
         try:
             if not session.ready:
+                self.passthrough += 1
                 return payload
             if session.can_passthrough(user_id):
+                self.passthrough += 1
                 return payload
             plaintext = session.decrypt(user_id, davey.MediaType.audio, payload)
         except Exception as exc:
+            self.dropped += 1
             self._note_failure(user_id, str(exc))
             return None
 
         if not plaintext:
+            self.dropped += 1
             self._note_failure(user_id, "empty plaintext")
             return None
+
+        self.decrypted += 1
 
         if self._fail_counts.pop(user_id, 0):
             log.info("DAVE decryption recovered for user %s", user_id)

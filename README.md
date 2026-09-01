@@ -289,6 +289,51 @@ have said.
 
 ---
 
+## First run on real hardware
+
+Everything above this line is verifiable without a GPU or a Discord connection. These two
+steps are not, and they are the whole of the bring-up.
+
+**1. The models — one command.**
+
+```bash
+voicecode --selftest
+```
+
+This is the only check that exercises NeMo loading `parakeet-unified-en-0.6b`, Kokoro
+synthesis, and silero-vad. It fails loudly and per stage, so a missing `espeak-ng` or an
+ASR backend that will not load is named rather than inferred. A pass means the local
+inference half of the bot works.
+
+**2. The voice connection — join, speak, `/status`.**
+
+The receive path cannot be tested offline: it needs real DAVE-encrypted traffic from a
+real Discord voice server. Join a channel, say one sentence, then run `/status`. The
+**Receive path** section reports what actually happened to your audio:
+
+```
+in=312 decrypted=312 passthrough=0 dropped=0 decoded=312 decode_failed=0 utterances=1
+healthy -- 312 frame(s) decoded, 1 utterance(s) endpointed
+```
+
+Do not judge this by whether the bot replied. Four unrelated faults produce the same
+symptom — a bot that sits there silently — because the receive path fails without raising:
+decrypting with the wrong key yields bytes that are not Opus, and the decoder discards
+them at DEBUG level. The counters separate them:
+
+| What `/status` shows | What it means |
+|---|---|
+| `in=0` | Nothing is arriving. Bot server-deafened, `voice_states` intent off, or the speaker is not in `USER_ALLOWLIST` — that gate drops audio before decryption. |
+| `in` high, `decoded=0`, `passthrough` high | Frames are arriving still encrypted. The decrypt step is being skipped. **This is the failure `audio/dave.py` exists to prevent** — see the DAVE section at the top. |
+| `in` high, `decoded=0`, `dropped` high | DAVE is active and rejecting our `decrypt` calls. A `davey` or `discord.py` version mismatch. |
+| `decoded` high, `utterances=0` | Audio is fine; the VAD is the problem. Lower `VAD_THRESHOLD` or `MIN_UTTERANCE_MS`. |
+| `healthy -- ...` | Working. |
+
+You do not have to remember to check: after 5 seconds of audio with nothing surviving, the
+bot logs one `WARNING` with the same verdict. One, not one per 20 ms frame.
+
+---
+
 ## Latency
 
 Target is **under 1.5 s** from end-of-speech to first spoken audio. Set
