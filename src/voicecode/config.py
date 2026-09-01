@@ -22,7 +22,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import BeforeValidator, Field, SecretStr, field_validator
+from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 log = logging.getLogger(__name__)
@@ -137,13 +137,14 @@ class Settings(BaseSettings):
     # --- Ops -------------------------------------------------------------------
     log_level: str = "INFO"
 
-    @field_validator("text_channel_binding")
-    @classmethod
-    def _no_self_binding(cls, v: dict[int, int]) -> dict[int, int]:
-        for voice_id, text_id in v.items():
-            if voice_id == text_id:
-                raise ValueError(f"channel {voice_id} is bound to itself")
-        return v
+    # There is deliberately no "a channel may not be bound to itself" check.
+    # Discord voice channels carry a built-in text chat whose channel ID *is* the
+    # voice channel's ID (Text-in-Voice), and discord.py models that by making
+    # VoiceChannel a Messageable -- so `1234:1234` is a valid, useful binding
+    # meaning "mirror into this voice channel's own chat", and mirror.py sends to
+    # it without caring which kind of channel it is. Rejecting it caught a
+    # plausible copy-paste slip, but at the cost of refusing a real configuration,
+    # and a wrong-but-distinct ID slipped through the same check anyway.
 
 
 @dataclass(frozen=True, slots=True)

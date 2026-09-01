@@ -271,6 +271,17 @@ decoder, a buffer, or the GPU.
 Point 12 is what makes hot-reload real. Without it, removing a channel from the
 allowlist would not remove the bot from it.
 
+### Mirroring into the voice channel's own chat
+
+Point 4 requires a text binding, but that text channel does not have to be a separate
+one. A Discord voice channel carries a built-in text chat whose channel ID *is* the
+voice channel's, so binding a channel to itself is valid and means "mirror into this
+voice channel's chat":
+
+```bash
+TEXT_CHANNEL_BINDING=1544378611170025583:1544378611170025583
+```
+
 ---
 
 ## Self-test

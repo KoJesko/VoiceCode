@@ -26,9 +26,20 @@ def test_binding_rejects_malformed_entry():
         Settings(text_channel_binding="10-20")
 
 
-def test_binding_rejects_self_binding():
-    with pytest.raises(ValueError):
-        Settings(text_channel_binding="10:10")
+def test_binding_accepts_a_channel_bound_to_itself():
+    # Discord's Text-in-Voice gives a voice channel a built-in text chat whose
+    # channel ID is the voice channel's own ID, so this is a real configuration
+    # meaning "mirror into this voice channel's chat" -- not a typo to reject.
+    s = Settings(text_channel_binding="10:10")
+    assert s.text_channel_binding == {10: 10}
+
+
+def test_a_self_bound_channel_is_occupiable():
+    # The binding is what makes a channel joinable, so self-binding has to
+    # satisfy occupiable() or the bot would still refuse the channel.
+    s = AllowlistSnapshot(frozenset({1}), frozenset({2}), frozenset(), {2: 2}, False, 0)
+    assert s.bound_text_channel(2) == 2
+    assert s.occupiable(2)
 
 
 def test_occupiable_requires_allowlist_and_binding():
