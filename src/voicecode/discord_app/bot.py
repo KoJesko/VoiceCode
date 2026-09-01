@@ -129,6 +129,7 @@ class VoiceCodeBot(discord.Client):
         )
         voice_client.listen(sink)
         session.sink = sink
+        session.start_idle_watch()
         self.sessions[guild_id] = session
 
         log.info("joined voice channel %s (%s)", channel.name, channel.id)

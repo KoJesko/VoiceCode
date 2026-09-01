@@ -43,6 +43,8 @@ from .scoping import log_refusal, turn_gate
 
 log = logging.getLogger(__name__)
 
+_IDLE_CHECK_INTERVAL_S = 30.0
+
 
 @dataclass
 class PendingPermission:
@@ -96,6 +98,8 @@ class VoiceSession:
         self._ptt_open = False
         self._last_prompt: str | None = None
         self._speaking_task: asyncio.Task | None = None
+        self._last_activity_at = time.time()
+        self._idle_task: asyncio.Task | None = None
 
     # -- identity ----------------------------------------------------------------
 
@@ -115,6 +119,38 @@ class VoiceSession:
     def rate_limited(self) -> bool:
         return self._rate_limit is not None and self._rate_limit.open
 
+    # -- idle auto-leave -----------------------------------------------------------
+
+    def start_idle_watch(self) -> None:
+        self._idle_task = asyncio.create_task(self._idle_watch_loop())
+
+    async def _idle_watch_loop(self) -> None:
+        """Leave after IDLE_LEAVE_MINUTES with no transcribed speech.
+
+        Polled rather than a single sleep-until-timeout so the threshold stays
+        live-reloadable and a turn or playback in progress is never cut off.
+        """
+        try:
+            while True:
+                await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
+                minutes = self.config.settings.idle_leave_minutes
+                if minutes <= 0:
+                    continue
+                if self._turn_lock.locked() or self.playback.active:
+                    continue
+                idle_for = time.time() - self._last_activity_at
+                if idle_for < minutes * 60:
+                    continue
+                guild_id = self.guild_id
+                log.info(
+                    "guild %s idle for %.0fs (limit %dm); leaving", guild_id, idle_for, minutes
+                )
+                if guild_id is not None:
+                    await self.bot.leave_guild_voice(guild_id, f"no activity for {minutes} min")
+                return
+        except asyncio.CancelledError:
+            pass
+
     # -- TurnConsumer ------------------------------------------------------------
 
     async def on_speech_start(self, user_id: int) -> None:
@@ -133,6 +169,8 @@ class VoiceSession:
         if not decision:
             log_refusal("turn", decision, user=utterance.user_id, channel=self.channel_id)
             return
+
+        self._last_activity_at = time.time()
 
         timer = TurnTimer(label=f"user:{utterance.user_id}")
         timer.t0 = utterance.ended_at  # the clock starts at end of speech
@@ -435,6 +473,8 @@ class VoiceSession:
         return getattr(member, "display_name", None) or str(user_id)
 
     async def shutdown(self) -> None:
+        if self._idle_task is not None:
+            self._idle_task.cancel()
         self.playback.stop(self.voice_client)
         if self.voice_client.is_connected():
             await self.voice_client.disconnect(force=True)

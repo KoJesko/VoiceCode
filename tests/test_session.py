@@ -7,6 +7,7 @@ shared subscription pool, or talking over someone. They had no coverage.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import numpy as np
@@ -15,6 +16,7 @@ import pytest
 from voicecode.audio.turn import TurnEvent, TurnEventKind, Utterance
 from voicecode.bridge.base import BridgeEvent, EventKind, PermissionDecision
 from voicecode.config import AllowlistSnapshot, ConfigStore, Settings, WakeMode
+from voicecode.discord_app import session as session_module
 from voicecode.discord_app.session import VoiceSession
 
 GUILD, VOICE, TEXT, USER = 1, 2, 5, 3
@@ -340,3 +342,85 @@ async def test_bridge_error_is_reported_not_swallowed():
     session, _, mirror = build([BridgeEvent(EventKind.ERROR, "claude exited 1")])
     await session.on_utterance(utterance_event())
     assert any("claude exited 1" in m for m in mirror.sent)
+
+
+# -- idle auto-leave ------------------------------------------------------------
+
+class FakeBot:
+    def __init__(self):
+        self.left = []
+
+    async def leave_guild_voice(self, guild_id, reason=""):
+        self.left.append((guild_id, reason))
+        return True
+
+
+def build_with_bot(idle_leave_minutes):
+    store = ConfigStore(settings=Settings(idle_leave_minutes=idle_leave_minutes))
+    store.replace_snapshot(snapshot())
+    bot = FakeBot()
+    session = VoiceSession(
+        bot=bot,
+        voice_client=FakeVoiceClient(),
+        config=store,
+        asr=FakeASR(),
+        tts=FakeTTS(),
+        bridge=FakeBridge([]),
+        mirror=FakeMirror(),
+    )
+    return session, bot
+
+
+async def test_utterance_resets_idle_activity():
+    session, _, _ = build([])
+    session._last_activity_at = 0.0
+    await session.on_utterance(utterance_event())
+    assert session._last_activity_at > 0.0
+
+
+async def test_idle_watch_leaves_after_the_configured_minutes(monkeypatch):
+    monkeypatch.setattr(session_module, "_IDLE_CHECK_INTERVAL_S", 0.01)
+    session, bot = build_with_bot(idle_leave_minutes=1)
+    session._last_activity_at = time.time() - 61  # already past the 1-minute limit
+
+    session.start_idle_watch()
+    await asyncio.sleep(0.05)
+
+    assert bot.left == [(GUILD, "no activity for 1 min")]
+
+
+async def test_idle_watch_does_not_fire_before_the_threshold(monkeypatch):
+    monkeypatch.setattr(session_module, "_IDLE_CHECK_INTERVAL_S", 0.01)
+    session, bot = build_with_bot(idle_leave_minutes=30)  # last_activity_at is "now"
+
+    session.start_idle_watch()
+    await asyncio.sleep(0.05)
+    session._idle_task.cancel()
+
+    assert bot.left == []
+
+
+async def test_idle_watch_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(session_module, "_IDLE_CHECK_INTERVAL_S", 0.01)
+    session, bot = build_with_bot(idle_leave_minutes=0)
+    session._last_activity_at = time.time() - 10_000
+
+    session.start_idle_watch()
+    await asyncio.sleep(0.05)
+    session._idle_task.cancel()
+
+    assert bot.left == []
+
+
+async def test_idle_watch_never_fires_mid_turn(monkeypatch):
+    """A turn in progress must never be cut off, even past the idle threshold."""
+    monkeypatch.setattr(session_module, "_IDLE_CHECK_INTERVAL_S", 0.01)
+    session, bot = build_with_bot(idle_leave_minutes=1)
+    session._last_activity_at = time.time() - 61
+
+    async with session._turn_lock:
+        session.start_idle_watch()
+        await asyncio.sleep(0.05)
+
+    assert bot.left == [], "left mid-turn"
+    session._idle_task.cancel()

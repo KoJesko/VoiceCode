@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     min_utterance_ms: int = Field(default=300, ge=0, le=5000)
     max_utterance_ms: int = Field(default=30_000, ge=1000)
     vad_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Leave a voice channel after this many minutes with no transcribed speech from an
+    # allowlisted user. 0 disables auto-leave. Never fires mid-turn or mid-playback.
+    idle_leave_minutes: int = Field(default=0, ge=0)
 
     # --- ASR -------------------------------------------------------------------
     asr_backend: AsrBackend = AsrBackend.NEMO_UNIFIED
