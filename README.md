@@ -239,6 +239,7 @@ re-checks scope before acting.
 | `/approve`, `/deny` | Answer a pending permission prompt. The only way to do so. |
 | `/reload` | Reload allowlists from `.env` and evict any now-disallowed connections. |
 | `/status` | Auth method, scope, GPU, DAVE session, bridge degradation. |
+| `/models [unload]` | Model residency and load counts; `unload:true` frees their VRAM now. |
 
 ---
 
@@ -356,10 +357,35 @@ turn user:123 | endpoint=0ms asr=180ms bridge_first=610ms tts_first=890ms first_
 
 All stages are cumulative from end-of-speech, so the line reads as a budget. What helps:
 
-- Both models load and warm up at startup with a dummy tensor, and stay resident.
+- Both models load and warm up with a dummy tensor, and stay resident by default.
 - Synthesis is sentence-by-sentence, so playback starts on sentence one while Claude is
   still writing sentence three.
 - Transcription starts at the endpoint, when the clock starts.
+
+---
+
+## Trading latency for VRAM
+
+The two models hold well over a gigabyte between them, and a bot sitting in a channel
+overnight holds it for nothing. `MODEL_IDLE_UNLOAD_MINUTES` unloads them after a period
+unused and reloads them on the next turn:
+
+```
+MODEL_IDLE_UNLOAD_MINUTES=10
+```
+
+**The turn that reloads is slow** — the full load plus warmup, several seconds for NeMo,
+far outside the 1.5 s target above. Every later turn is at full speed until the models
+go idle again. That is the whole trade, and it is why the default is `0`, meaning always
+resident.
+
+With it on, nothing is loaded at startup either; the first thing anyone says brings both
+models up. A model is never unloaded during a call that is using it, and unloading is
+not disabling: an unloaded Kokoro still reports itself able to speak and reloads on the
+next sentence. Only a real failure disables TTS.
+
+`/models` shows residency and load counts; `/models unload:true` frees both now.
+`/reload` retunes the threshold without a restart.
 
 ---
 
@@ -371,6 +397,7 @@ All stages are cumulative from end-of-speech, so the line reads as a budget. Wha
 | silero-vad unavailable | falls back to energy-based endpointing, logs it |
 | Kokoro fails to load | bot starts anyway, text-only |
 | ASR fails to load | startup aborts — without it there is no bot |
+| Reload fails after an idle unload | that turn is dropped and logged; the next one retries |
 | DAVE preflight fails | startup aborts, rather than transcribing noise |
 | Bound text channel unreachable | logged at ERROR; the bot refuses to join without a binding |
 
@@ -380,7 +407,7 @@ All stages are cumulative from end-of-speech, so the line reads as a budget. Wha
 
 ```bash
 uv pip install -e '.[dev]'
-pytest                    # 112 tests, no GPU or network required
+pytest                    # no GPU or network required
 ruff check src tests
 ```
 

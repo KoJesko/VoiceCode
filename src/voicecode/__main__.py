@@ -18,6 +18,7 @@ from .asr.base import ASR_SAMPLE_RATE, build_engine
 from .bridge.base import AuthError, BridgeError, EventKind
 from .config import BridgeKind, ConfigStore, describe_scope
 from .logging_setup import setup_logging
+from .residency import ManagedASR, ManagedTTS, run_janitor
 from .speech.sanitize import sanitize_for_speech
 from .tts.kokoro_engine import KokoroTTS
 
@@ -306,17 +307,30 @@ async def run_bot(config: ConfigStore) -> int:
         log.error("bridge failed to start: %s", exc)
         return 2
 
-    asr = build_engine(settings.asr_backend.value, settings.asr_model_id, settings.asr_device)
-    asr.load()
+    asr = ManagedASR(
+        build_engine(settings.asr_backend.value, settings.asr_model_id, settings.asr_device)
+    )
+    tts = ManagedTTS(KokoroTTS(settings.tts_lang_code, settings.tts_voice, settings.tts_speed))
 
-    tts = KokoroTTS(settings.tts_lang_code, settings.tts_voice, settings.tts_speed)
-    try:
-        tts.load()
-    except Exception as exc:
-        # Degrade rather than refuse to start: a bot that hears and answers in text
-        # is useful; one that will not connect is not.
-        log.error("TTS unavailable, continuing without speech: %s", exc)
-        tts.disable(str(exc))
+    # With unloading on, loading here would only be undone a few minutes later, and it
+    # would hold the GPU through a startup nobody is talking during. The models come up
+    # on the first turn instead. With it off, load eagerly as before -- an ASR failure
+    # is still fatal, and it should be fatal at startup rather than mid-conversation.
+    lazy = settings.model_idle_unload_minutes > 0
+    if lazy:
+        log.info(
+            "models will load on first use and unload after %d min idle",
+            settings.model_idle_unload_minutes,
+        )
+    else:
+        asr.load()
+        try:
+            tts.load()
+        except Exception as exc:
+            # Degrade rather than refuse to start: a bot that hears and answers in text
+            # is useful; one that will not connect is not.
+            log.error("TTS unavailable, continuing without speech: %s", exc)
+            tts.disable(str(exc))
 
     try:
         SileroVad.load()
@@ -327,11 +341,20 @@ async def run_bot(config: ConfigStore) -> int:
 
     bot = VoiceCodeBot(config=config, asr=asr, tts=tts, bridge=bridge)
     _install_shutdown_handlers(bot)
+    janitor = asyncio.create_task(
+        run_janitor(
+            [asr.model, tts.model],
+            lambda: config.settings.model_idle_unload_minutes,
+        )
+    )
     try:
         await bot.start(settings.discord_token.get_secret_value())
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        janitor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await janitor
         # Leaves voice channels, stops playback, and terminates any in-flight
         # `claude -p` subprocess rather than orphaning it.
         await bot.close()

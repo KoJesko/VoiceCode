@@ -11,6 +11,7 @@ spoken ever resolves one.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -97,6 +98,36 @@ def register_commands(bot) -> None:  # noqa: C901 - a flat command table reads b
             return
         bot.tts.set_voice(name)
         await interaction.response.send_message(f"Voice set to `{name}`.", ephemeral=True)
+
+    @tree.command(name="models", description="Model residency; optionally unload them now")
+    @app_commands.describe(unload="Unload both models now, freeing their VRAM")
+    async def models(interaction: discord.Interaction, unload: bool = False) -> None:
+        if not await guard(interaction):
+            return
+        managed = [m for m in (getattr(bot.asr, "model", None), getattr(bot.tts, "model", None))
+                   if m is not None]
+        if not managed:
+            await interaction.response.send_message(
+                "This build does not manage model residency.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        if unload:
+            # Off the event loop: freeing CUDA memory is slow, and the loop is also
+            # decoding audio. A model in use refuses and says so below.
+            for model in managed:
+                await asyncio.to_thread(model.unload_now)
+
+        minutes = bot.config.settings.model_idle_unload_minutes
+        policy = (
+            f"unloading after {minutes} min idle" if minutes > 0 else "always resident"
+        )
+        lines = [f"**Models** — {policy}"]
+        lines += [f"{m.name}: {m.residency()} ({m.loads} load(s), {m.unloads} unload(s))"
+                  for m in managed]
+        lines.append(_gpu_line())
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @tree.command(name="mode", description="Set the wake gate")
     @app_commands.describe(gate="always, wakeword, or ptt")
@@ -232,6 +263,9 @@ def register_commands(bot) -> None:  # noqa: C901 - a flat command table reads b
             bot.tts.describe(),
             _gpu_line(),
         ]
+        idle_unload = bot.config.settings.model_idle_unload_minutes
+        if idle_unload > 0:
+            lines.append(f"unloading after {idle_unload} min idle")
         if session is not None:
             lines += [
                 "",

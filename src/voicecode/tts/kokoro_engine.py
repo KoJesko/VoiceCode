@@ -92,12 +92,23 @@ class KokoroTTS:
     def describe(self) -> str:
         if self._disabled_reason:
             return f"Kokoro disabled: {self._disabled_reason}"
-        if self._pipeline is None:
-            return "Kokoro not loaded"
+        # See asr/nemo_unified.describe: residency is ManagedTTS's to report.
         return f"Kokoro voice={self.voice} lang={self.lang_code} speed={self.speed:g}"
 
     def set_voice(self, voice: str) -> None:
         self.voice = voice
+
+    def unload(self) -> None:
+        """Drop the pipeline and free its memory, staying available to reload.
+
+        Distinct from disable(): unloading is routine and reversible, disabling is a
+        verdict that speech is broken. Only the latter sets a reason, and only the
+        latter makes `enabled` false.
+        """
+        if self._pipeline is None:
+            return
+        self._pipeline = None
+        _empty_cuda_cache()
 
     def disable(self, reason: str) -> None:
         log.error("disabling TTS: %s", reason)

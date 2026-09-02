@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     # Leave a voice channel after this many minutes with no transcribed speech from an
     # allowlisted user. 0 disables auto-leave. Never fires mid-turn or mid-playback.
     idle_leave_minutes: int = Field(default=0, ge=0)
+    # Unload the ASR and TTS models after this many minutes unused, reloading them on
+    # the next turn. 0 keeps them resident, which is the old behaviour and the fast
+    # one: the turn that reloads pays several seconds. Trades first-turn latency for
+    # VRAM. Read live by the janitor, so /reload retunes it.
+    model_idle_unload_minutes: int = Field(default=0, ge=0)
 
     # --- ASR -------------------------------------------------------------------
     asr_backend: AsrBackend = AsrBackend.NEMO_UNIFIED

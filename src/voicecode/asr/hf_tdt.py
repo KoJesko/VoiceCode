@@ -90,8 +90,8 @@ class HFParakeetASR:
             pass
 
     def describe(self) -> str:
-        state = "loaded" if self._model is not None else "not loaded"
-        return f"transformers {self.model_id} on {self.device} ({state})"
+        # See nemo_unified.describe: residency is reported by ManagedASR, not here.
+        return f"transformers {self.model_id} on {self.device}"
 
     def transcribe(self, audio: np.ndarray) -> Transcript:
         if self._model is None or self._processor is None:

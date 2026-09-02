@@ -1,8 +1,9 @@
 """Parakeet via NVIDIA NeMo. The default backend.
 
 Model: nvidia/parakeet-unified-en-0.6b (offline+streaming in one checkpoint; we use it
-offline). Loaded once at startup, warmed with a dummy tensor so the first real
-utterance does not pay CUDA kernel autotuning, and kept resident on the GPU.
+offline). Warmed with a dummy tensor on every load, so the first utterance after a load
+does not pay CUDA kernel autotuning. How long it stays on the GPU is not decided here --
+see residency.py and MODEL_IDLE_UNLOAD_MINUTES.
 
 NeMo's `transcribe()` is documented against file paths. Recent versions also accept
 in-memory arrays, which avoids a disk round-trip per turn -- worth roughly the write
@@ -98,8 +99,9 @@ class NemoUnifiedASR:
             pass
 
     def describe(self) -> str:
-        state = "loaded" if self._model is not None else "not loaded"
-        return f"NeMo {self.model_id} on {self.device} ({state})"
+        # No load state here: residency.ManagedASR owns that and reports it, so
+        # saying it twice would only give two chances to disagree.
+        return f"NeMo {self.model_id} on {self.device}"
 
     # -- inference ---------------------------------------------------------------
 
