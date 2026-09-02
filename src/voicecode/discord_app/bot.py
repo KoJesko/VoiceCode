@@ -127,7 +127,22 @@ class VoiceCodeBot(discord.Client):
             max_utterance_ms=settings.max_utterance_ms,
             vad_threshold=settings.vad_threshold,
         )
-        voice_client.listen(sink)
+        # The `after` hook is the only place the extension surfaces why the
+        # receive pipeline stopped. Without it, PacketRouter.run() catches the
+        # exception, stashes it on AudioReader.error, calls stop_listening() in
+        # its finally, and the bot goes permanently deaf with nothing in the log
+        # -- the packet-router, sink-event-router and speaking-timer threads all
+        # exit while the process stays up and the voice connection looks fine.
+        def _listening_ended(error: Exception | None) -> None:
+            if error is not None:
+                log.error(
+                    "voice receive pipeline stopped in guild %s: %r", guild_id, error,
+                    exc_info=error,
+                )
+            else:
+                log.warning("voice receive pipeline stopped in guild %s", guild_id)
+
+        voice_client.listen(sink, after=_listening_ended)
         # Endpoints a turn when the packet flow stops rather than goes quiet, which
         # is what push-to-talk release looks like from here.
         sink.start_endpoint_watchdog()

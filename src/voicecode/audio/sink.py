@@ -296,8 +296,15 @@ class VoiceCodeSink(voice_recv.AudioSink):
             return []
         cutoff = time.monotonic() - self._endpoint_silence_ms / 1000.0
         events: list[TurnEvent] = []
+        # Non-blocking on purpose. This runs on the event loop, and the lock is
+        # held by the packet-router thread across silero VAD inference. Blocking
+        # here would stall the loop -- and the loop drives playback, the gateway
+        # heartbeat and the voice keepalive. A skipped tick costs 100 ms of
+        # endpoint latency; a stalled loop drops the voice connection.
+        if not self._buffer_lock.acquire(blocking=False):
+            return []
         # Collected under the lock, dispatched outside it: _emit hops threads.
-        with self._buffer_lock:
+        try:
             for user_id, buffer in self._buffers.items():
                 if not buffer.speaking:
                     continue
@@ -313,6 +320,8 @@ class VoiceCodeSink(voice_recv.AudioSink):
                         (time.monotonic() - last) * 1000.0,
                     )
                     events.append(event)
+        finally:
+            self._buffer_lock.release()
         return events
 
     # -- diagnosis --------------------------------------------------------------

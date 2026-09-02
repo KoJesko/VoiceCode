@@ -34,9 +34,13 @@ class FakeVoiceClient:
         self.channel = type("C", (), {"id": VOICE, "name": "dev"})()
         self.playing = False
         self.stop_calls = 0
+        self.listening = True
 
     def is_connected(self):
         return True
+
+    def is_listening(self):
+        return self.listening
 
     def is_playing(self):
         return self.playing
@@ -45,6 +49,13 @@ class FakeVoiceClient:
         self.playing = True
 
     def stop(self):
+        # Mirrors VoiceRecvClient.stop(), which is stop_playing() +
+        # stop_listening(). Calling this for a barge-in is the bug.
+        self.playing = False
+        self.listening = False
+        self.stop_calls += 1
+
+    def stop_playing(self):
         self.playing = False
         self.stop_calls += 1
 
@@ -349,10 +360,15 @@ async def test_bridge_error_is_reported_not_swallowed():
 class FakeBot:
     def __init__(self):
         self.left = []
+        self.joined = []
 
     async def leave_guild_voice(self, guild_id, reason=""):
         self.left.append((guild_id, reason))
         return True
+
+    async def join_channel(self, channel):
+        self.joined.append(channel)
+        return None
 
 
 def build_with_bot(idle_leave_minutes):
@@ -424,3 +440,55 @@ async def test_idle_watch_never_fires_mid_turn(monkeypatch):
 
     assert bot.left == [], "left mid-turn"
     session._idle_task.cancel()
+
+
+# -- dead receive pipeline ----------------------------------------------------
+#
+# PacketRouter.run() calls stop_listening() in its finally clause, so a crash in
+# the receive path leaves a connected-but-deaf bot with nothing in the log.
+# is_listening() is the only in-process signal.
+
+
+async def test_deaf_session_schedules_a_rejoin():
+    session, bot = build_with_bot(0)
+    session.sink = object()  # attached, so the session believes it is listening
+    session.voice_client.listening = False
+
+    assert await session._recover_if_deaf() is True
+    await asyncio.sleep(0)  # let the detached rejoin task run
+    assert bot.left == [(GUILD, "audio receiver died")]
+    assert [getattr(c, "id", None) for c in bot.joined] == [VOICE]
+
+
+async def test_listening_session_is_left_alone():
+    session, bot = build_with_bot(0)
+    session.sink = object()
+
+    assert await session._recover_if_deaf() is False
+    assert bot.left == [] and bot.joined == []
+
+
+async def test_session_without_a_sink_is_not_treated_as_deaf():
+    """Before the sink is attached there is nothing to be deaf with."""
+    session, bot = build_with_bot(0)
+    session.voice_client.listening = False
+
+    assert await session._recover_if_deaf() is False
+    assert bot.left == []
+
+
+async def test_barge_in_does_not_stop_listening():
+    """Barge-in must not deafen the bot.
+
+    VoiceRecvClient.stop() is overridden to stop playing AND receiving, so
+    calling it to cancel playback tore down the receive pipeline on every
+    interruption: connected, still able to speak, permanently deaf.
+    """
+    session, _, _ = build([])
+    session.playback.start(session.voice_client)
+    session.voice_client.playing = True
+
+    await session.on_speech_start(USER)
+
+    assert session.voice_client.playing is False
+    assert session.voice_client.listening is True

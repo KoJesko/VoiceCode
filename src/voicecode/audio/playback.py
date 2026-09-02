@@ -143,7 +143,19 @@ class PlaybackController:
 
         dropped = source.flush() if source is not None else 0
         if voice_client is not None and voice_client.is_playing():
-            voice_client.stop()
+            # NOT voice_client.stop(). VoiceRecvClient overrides stop() to mean
+            # "stop playing AND stop receiving" -- it calls stop_playing() then
+            # stop_listening(), which tears down the packet router, the sink
+            # event router and the speaking timer. Barge-in calls this on every
+            # interruption, so stop() here left the bot connected, still able to
+            # speak, and permanently deaf: audio piled up unread in the socket
+            # while the receive pipeline was gone. Nothing logged it, because
+            # this is a clean shutdown rather than a crash.
+            stop_playing = getattr(voice_client, "stop_playing", None)
+            if stop_playing is not None:
+                stop_playing()
+            else:
+                voice_client.stop()
         if dropped:
             log.debug("barge-in dropped %d queued frame(s)", dropped)
         return dropped

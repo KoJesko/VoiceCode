@@ -43,7 +43,11 @@ from .scoping import log_refusal, turn_gate
 
 log = logging.getLogger(__name__)
 
-_IDLE_CHECK_INTERVAL_S = 30.0
+_IDLE_CHECK_INTERVAL_S = 5.0
+# Lowered from 30s: this loop also watches for a dead receive pipeline, and every
+# second spent deaf is a second the bot silently ignores the channel. The idle
+# check itself compares wall-clock timestamps, so polling more often changes
+# nothing about when it fires.
 
 
 @dataclass
@@ -133,6 +137,8 @@ class VoiceSession:
         try:
             while True:
                 await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
+                if await self._recover_if_deaf():
+                    return
                 minutes = self.config.settings.idle_leave_minutes
                 if minutes <= 0:
                     continue
@@ -150,6 +156,50 @@ class VoiceSession:
                 return
         except asyncio.CancelledError:
             pass
+
+    async def _recover_if_deaf(self) -> bool:
+        """Rejoin if the receive pipeline died while the connection stayed up.
+
+        PacketRouter.run() calls stop_listening() from its finally clause, so any
+        crash in the receive path tears down the packet router, the sink event
+        router and the speaking timer while leaving the voice websocket, the UDP
+        keepalive and the player untouched. The bot looks connected, still speaks
+        when told to, and simply never hears anything again -- audio piles up
+        unread in the socket receive queue.
+
+        is_listening() is the only in-process signal that this has happened.
+        Returns True when a rejoin was scheduled, which ends this watch loop; the
+        replacement session starts its own.
+        """
+        if self.sink is None or not self.voice_client.is_connected():
+            return False
+        if self.voice_client.is_listening():
+            return False
+
+        channel = self.voice_client.channel
+        guild_id = self.guild_id
+        log.error(
+            "voice receive pipeline is dead in guild %s (connected but not "
+            "listening); rejoining %s",
+            guild_id,
+            getattr(channel, "name", channel),
+        )
+        await self.mirror.notice(
+            guild_id, self.channel_id, "Lost the audio receiver; reconnecting."
+        )
+        # Detached: leave_guild_voice() calls shutdown(), which cancels this very
+        # task, so the rejoin cannot be awaited from inside it.
+        asyncio.create_task(self._rejoin(guild_id, channel))
+        return True
+
+    async def _rejoin(self, guild_id: int | None, channel) -> None:
+        try:
+            if guild_id is not None:
+                await self.bot.leave_guild_voice(guild_id, "audio receiver died")
+            if channel is not None:
+                await self.bot.join_channel(channel)
+        except Exception:
+            log.exception("failed to rejoin after the receive pipeline died")
 
     # -- TurnConsumer ------------------------------------------------------------
 
