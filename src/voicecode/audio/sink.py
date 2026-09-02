@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,6 +51,11 @@ IDLE_BUFFER_TTL_S = 120.0
 # certainly decoded something, short enough to fail during the first sentence
 # somebody speaks rather than after a frustrating session.
 DIAGNOSIS_MIN_FRAMES = 250
+
+# How often the watchdog looks for a buffer whose audio simply stopped arriving.
+# Short relative to endpoint_silence_ms (700 ms by default) so the endpoint it
+# produces lands close to where a continuous stream would have put it.
+ENDPOINT_WATCHDOG_INTERVAL_S = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +170,10 @@ class VoiceCodeSink(voice_recv.AudioSink):
         self._buffers: dict[int, TurnBuffer] = {}
         self._last_audio_at: dict[int, float] = {}
         self._ssrc_for_user: dict[int, int] = {}
+        # write() runs on the reader thread; the watchdog runs on the event loop.
+        # Both touch the same TurnBuffer, so every buffer access takes this lock.
+        self._buffer_lock = threading.Lock()
+        self._watchdog_task: asyncio.Task | None = None
         self._muted = False
         self._accepting = True
         self._frames_in = 0
@@ -176,15 +186,20 @@ class VoiceCodeSink(voice_recv.AudioSink):
         return True
 
     def cleanup(self) -> None:
-        for user_id, buffer in list(self._buffers.items()):
-            event = buffer.flush("cleanup")
-            if event and event.kind is TurnEventKind.UTTERANCE:
-                self._dispatch(self._consumer.on_utterance(event))
-            self._decryptor.forget(user_id)
-        self._buffers.clear()
-        self._last_audio_at.clear()
-        self._decoders.clear()
-        self._ssrc_for_user.clear()
+        self.stop_endpoint_watchdog()
+        pending: list[TurnEvent] = []
+        with self._buffer_lock:
+            for user_id, buffer in list(self._buffers.items()):
+                event = buffer.flush("cleanup")
+                if event and event.kind is TurnEventKind.UTTERANCE:
+                    pending.append(event)
+                self._decryptor.forget(user_id)
+            self._buffers.clear()
+            self._last_audio_at.clear()
+            self._decoders.clear()
+            self._ssrc_for_user.clear()
+        for event in pending:
+            self._dispatch(self._consumer.on_utterance(event))
 
     def write(self, user: Any | None, data: voice_recv.VoiceData) -> None:
         # --- SCOPING GATE #7. Keep this first. ---------------------------------
@@ -217,11 +232,11 @@ class VoiceCodeSink(voice_recv.AudioSink):
             self._check_receive_health()
             return
 
-        self._last_audio_at[user_id] = time.monotonic()
-        self._reclaim_idle_buffers()
-
         try:
-            events = self._buffer_for(user_id).push_pcm(pcm)
+            with self._buffer_lock:
+                self._last_audio_at[user_id] = time.monotonic()
+                self._reclaim_idle_buffers()
+                events = self._buffer_for(user_id).push_pcm(pcm)
         except Exception:
             log.exception("turn buffering failed for user %s", user_id)
             return
@@ -230,6 +245,75 @@ class VoiceCodeSink(voice_recv.AudioSink):
             if event.kind is TurnEventKind.UTTERANCE:
                 self._utterances += 1
             self._emit(event)
+
+    # -- endpoint watchdog -------------------------------------------------------
+
+    def start_endpoint_watchdog(self) -> None:
+        """Endpoint turns whose audio stopped arriving rather than went quiet.
+
+        TurnBuffer only advances inside push_pcm, so it can only notice silence
+        that is *delivered* to it. That holds for an open mic, which transmits
+        continuously -- the quiet after a sentence arrives as frames, the VAD
+        scores them as non-speech, and `endpoint_silence_ms` elapses normally.
+
+        Push-to-talk breaks it. Releasing the key stops the packet flow dead:
+        write() is never called again, `_advance` never runs, and the buffered
+        speech sits in `_chunks` forever with `_speaking` still True. The turn is
+        never emitted, so the bot simply never answers. Worse, the buffer is
+        excluded from idle reclamation precisely *because* it is mid-utterance,
+        and the speaker's next press appends to that stale audio.
+
+        on_voice_member_speaking_stop cannot be the fix: on an open mic Discord
+        drops that flag during ordinary mid-sentence pauses, so endpointing there
+        truncates people constantly. Elapsed wall-clock since the last frame is
+        the signal that means the same thing in both modes.
+        """
+        if self._watchdog_task is not None:
+            return
+        self._watchdog_task = self._loop.create_task(self._endpoint_watchdog_loop())
+
+    def stop_endpoint_watchdog(self) -> None:
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+
+    async def _endpoint_watchdog_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(ENDPOINT_WATCHDOG_INTERVAL_S)
+                for event in self._sweep_stalled_buffers():
+                    if event.kind is TurnEventKind.UTTERANCE:
+                        self._utterances += 1
+                    self._emit(event)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("endpoint watchdog stopped unexpectedly")
+
+    def _sweep_stalled_buffers(self) -> list[TurnEvent]:
+        """Flush any buffer mid-utterance whose frames stopped long enough ago."""
+        if self._muted or not self._accepting:
+            return []
+        cutoff = time.monotonic() - self._endpoint_silence_ms / 1000.0
+        events: list[TurnEvent] = []
+        # Collected under the lock, dispatched outside it: _emit hops threads.
+        with self._buffer_lock:
+            for user_id, buffer in self._buffers.items():
+                if not buffer.speaking:
+                    continue
+                last = self._last_audio_at.get(user_id)
+                if last is None or last > cutoff:
+                    continue
+                event = buffer.flush("transmission_stopped")
+                if event is not None:
+                    log.debug(
+                        "endpointed user %s on stalled transmission (no audio for "
+                        "%.0fms) -- push-to-talk release or a dropped stream",
+                        user_id,
+                        (time.monotonic() - last) * 1000.0,
+                    )
+                    events.append(event)
+        return events
 
     # -- diagnosis --------------------------------------------------------------
 
@@ -307,12 +391,12 @@ class VoiceCodeSink(voice_recv.AudioSink):
         user_id = getattr(member, "id", None)
         if user_id is None:
             return
-        buffer = self._buffers.pop(user_id, None)
-        self._last_audio_at.pop(user_id, None)
-        if buffer is not None:
-            event = buffer.flush("disconnect")
-            if event is not None:
-                self._emit(event)
+        with self._buffer_lock:
+            buffer = self._buffers.pop(user_id, None)
+            self._last_audio_at.pop(user_id, None)
+            event = buffer.flush("disconnect") if buffer is not None else None
+        if event is not None:
+            self._emit(event)
         known_ssrc = ssrc if ssrc is not None else self._ssrc_for_user.pop(user_id, None)
         if known_ssrc is not None:
             self._decoders.drop(known_ssrc)
@@ -324,8 +408,9 @@ class VoiceCodeSink(voice_recv.AudioSink):
         """/mute: stop consuming audio without leaving the channel."""
         self._muted = muted
         if muted:
-            for buffer in self._buffers.values():
-                buffer.reset()
+            with self._buffer_lock:
+                for buffer in self._buffers.values():
+                    buffer.reset()
 
     def stop_accepting(self) -> None:
         self._accepting = False

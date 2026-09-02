@@ -128,6 +128,9 @@ class VoiceCodeBot(discord.Client):
             vad_threshold=settings.vad_threshold,
         )
         voice_client.listen(sink)
+        # Endpoints a turn when the packet flow stops rather than goes quiet, which
+        # is what push-to-talk release looks like from here.
+        sink.start_endpoint_watchdog()
         session.sink = sink
         session.start_idle_watch()
         self.sessions[guild_id] = session

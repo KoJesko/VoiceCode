@@ -237,3 +237,89 @@ def test_cleanup_clears_every_per_user_map(loop):
     sink.write(SimpleNamespace(id=ALLOWED), voice_data())
     sink.cleanup()
     assert sink._buffers == {} and sink._last_audio_at == {} and sink._ssrc_for_user == {}
+
+
+# -- endpoint watchdog (push-to-talk) -----------------------------------------
+#
+# TurnBuffer can only see silence that is delivered to it. A PTT release stops
+# the packet flow instead, so without the watchdog the turn is never endpointed
+# and the bot never answers -- the "only one message" failure.
+
+
+class StalledBuffer:
+    """A buffer stuck mid-utterance, as PTT release leaves it."""
+
+    def __init__(self, event) -> None:
+        self.speaking = True
+        self._event = event
+        self.flushed: list[str] = []
+
+    def flush(self, reason: str = "flush"):
+        self.flushed.append(reason)
+        self.speaking = False
+        return self._event
+
+    def reset(self) -> None:
+        self.speaking = False
+
+
+def _utterance_event(user_id=ALLOWED):
+    from voicecode.audio.turn import TurnEvent, TurnEventKind, Utterance
+
+    import numpy as np
+
+    return TurnEvent(
+        TurnEventKind.UTTERANCE,
+        user_id,
+        utterance=Utterance(user_id, np.zeros(16000, dtype=np.float32), 1000.0, 0.0),
+    )
+
+
+def test_watchdog_endpoints_a_buffer_whose_audio_stopped(loop):
+    sink, _, _, consumer = make_sink(loop)
+    buffer = StalledBuffer(_utterance_event())
+    sink._buffers[ALLOWED] = buffer
+    # Last frame arrived longer ago than endpoint_silence_ms.
+    sink._last_audio_at[ALLOWED] = time.monotonic() - 5.0
+
+    events = sink._sweep_stalled_buffers()
+
+    assert buffer.flushed == ["transmission_stopped"]
+    assert [e.kind for e in events] == [_utterance_event().kind]
+
+
+def test_watchdog_leaves_a_still_transmitting_buffer_alone(loop):
+    sink, _, _, consumer = make_sink(loop)
+    buffer = StalledBuffer(_utterance_event())
+    sink._buffers[ALLOWED] = buffer
+    sink._last_audio_at[ALLOWED] = time.monotonic()
+
+    assert sink._sweep_stalled_buffers() == []
+    assert buffer.flushed == []
+
+
+def test_watchdog_does_not_endpoint_while_muted(loop):
+    sink, _, _, consumer = make_sink(loop)
+    buffer = StalledBuffer(_utterance_event())
+    sink._buffers[ALLOWED] = buffer
+    sink._last_audio_at[ALLOWED] = time.monotonic() - 5.0
+    sink.set_muted(True)
+
+    assert sink._sweep_stalled_buffers() == []
+    assert buffer.flushed == []
+
+
+def test_watchdog_task_starts_once_and_stops(loop):
+    sink, _, _, _ = make_sink(loop)
+
+    async def drive():
+        sink.start_endpoint_watchdog()
+        first = sink._watchdog_task
+        sink.start_endpoint_watchdog()
+        assert sink._watchdog_task is first
+        sink.stop_endpoint_watchdog()
+        assert sink._watchdog_task is None
+        await asyncio.sleep(0)
+        assert first.cancelled() or first.done()
+
+    loop.run_until_complete(drive())

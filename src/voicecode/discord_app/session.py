@@ -475,6 +475,8 @@ class VoiceSession:
     async def shutdown(self) -> None:
         if self._idle_task is not None:
             self._idle_task.cancel()
+        if self.sink is not None:
+            self.sink.stop_endpoint_watchdog()
         self.playback.stop(self.voice_client)
         if self.voice_client.is_connected():
             await self.voice_client.disconnect(force=True)
