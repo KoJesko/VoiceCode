@@ -112,7 +112,6 @@ class HeadlessBridge:
         argv = [
             self._binary,
             "-p",
-            text,
             "--output-format",
             "stream-json",
             "--verbose",
@@ -124,7 +123,10 @@ class HeadlessBridge:
         if self._one_shot_tools:
             argv += ["--allowedTools", ",".join(sorted(self._one_shot_tools))]
         check_forbidden_flags(argv)
-        return argv
+        # The prompt goes last, after `--`. It is a transcript, and without the
+        # separator the CLI parses one that starts with "-" as options -- e.g.
+        # "--dangerously-skip-permissions", which would bypass /approve entirely.
+        return [*argv, "--", text]
 
     async def send(self, text: str) -> AsyncIterator[BridgeEvent]:
         async with self._lock:
@@ -133,7 +135,7 @@ class HeadlessBridge:
             self._one_shot_tools.clear()
             self._pending_tool = None
 
-            log.debug("headless turn: %s", " ".join(argv[:2] + ["<text>"] + argv[3:]))
+            log.debug("headless turn: %s", " ".join(argv[:-1] + ["<text>"]))
             try:
                 process = await asyncio.create_subprocess_exec(
                     *argv,

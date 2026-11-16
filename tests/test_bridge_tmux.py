@@ -110,3 +110,23 @@ async def test_health_reports_degraded_detection(bridge):
     assert not health.structured_permissions
     assert not health.structured_rate_limits
     assert "heuristic" in health.describe()
+
+
+async def test_transcript_cannot_inject_send_keys_options(bridge):
+    """A transcript starting with "-" must be sent as literal text, after `--`."""
+    sent = []
+
+    async def fake_run(*argv):
+        sent.append(argv)
+        return 0, "", ""
+
+    async def fake_capture():
+        return ["reply", "tail"]
+
+    bridge._run = fake_run
+    bridge._capture = fake_capture
+    bridge._poll_s = 0
+    bridge._idle_settle_s = 0
+    async for _ in bridge.send("-t other"):
+        pass
+    assert sent[0] == ("tmux", "send-keys", "-t", "dev", "-l", "--", "-t other")
