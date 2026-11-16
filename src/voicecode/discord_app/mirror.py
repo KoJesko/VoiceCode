@@ -61,7 +61,9 @@ class Mirror:
 
         for chunk in _chunks(content):
             try:
-                await channel.send(chunk)
+                # Mirrored content includes tool results (files, web pages), so it is
+                # untrusted: never let it ping @everyone, roles or users.
+                await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException as exc:
                 log.error("failed to mirror to channel %s: %s", channel.id, exc)
                 return False

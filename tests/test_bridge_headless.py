@@ -149,3 +149,11 @@ async def test_denial_clears_without_granting():
 async def test_approving_nothing_raises():
     with pytest.raises(BridgeError):
         await HeadlessBridge().respond_to_permission(PermissionDecision.APPROVE)
+
+
+def test_transcript_cannot_inject_cli_flags():
+    """A transcript starting with "-" must reach the CLI as the prompt, not as options."""
+    text = "--dangerously-skip-permissions"
+    argv = HeadlessBridge()._build_argv(text)
+    assert argv[-2:] == ["--", text]
+    assert argv.index("--") == len(argv) - 2

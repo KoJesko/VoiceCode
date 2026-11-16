@@ -171,8 +171,10 @@ class TmuxBridge:
         async with self._lock:
             self._pending_options.clear()
             # -l is essential: without it, tmux reads the transcript as key names.
+            # `--` is too: without it, a transcript starting with "-" is parsed as
+            # send-keys options (e.g. "-t other" retargets the keystrokes).
             code, _, err = await self._run(
-                "tmux", "send-keys", "-t", self._session, "-l", text
+                "tmux", "send-keys", "-t", self._session, "-l", "--", text
             )
             if code != 0:
                 yield BridgeEvent(EventKind.ERROR, f"tmux send-keys failed: {err.strip()}")
