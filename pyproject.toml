@@ -59,3 +59,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.uv]
+# Security: discord.py 2.7.1 caps PyNaCl <1.6, but 1.5.0 is affected by
+# GHSA advisories fixed in 1.6.2. PyNaCl 1.6 keeps the nacl.secret APIs that
+# discord.py's voice code uses, so override the upstream cap.
+override-dependencies = ["pynacl>=1.6.2,<2"]
