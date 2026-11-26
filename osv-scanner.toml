@@ -1,0 +1,28 @@
+# Known advisories that can't be fixed yet. ignoreUntil forces a re-check.
+# nemo-toolkit (optional [nemo] extra) caps lightning<=2.4.0 and hydra-core<=1.3.2,
+# and lightning 2.4.0 requires fsspec<2026.
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-4217"
+ignoreUntil = 2027-03-01
+reason = "fsspec held <2026 by lightning 2.4.0 (nemo-toolkit cap)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3850"
+ignoreUntil = 2027-03-01
+reason = "hydra-core capped <=1.3.2 by nemo-toolkit"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-4221"
+ignoreUntil = 2027-03-01
+reason = "hydra-core capped <=1.3.2 by nemo-toolkit"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3624"
+ignoreUntil = 2027-03-01
+reason = "lightning capped <=2.4.0 by nemo-toolkit"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3972"
+ignoreUntil = 2027-03-01
+reason = "lightning: no fixed version available"
